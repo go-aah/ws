@@ -17,6 +17,7 @@ import (
 	"aahframework.org/essentials.v0"
 	"aahframework.org/log.v0"
 	"aahframework.org/router.v0"
+	"aahframework.org/valpar.v0"
 
 	gws "github.com/gobwas/ws"
 )
@@ -62,6 +63,13 @@ type IDGenerator func(ctx *Context) string
 // EventCallbackFunc func type used for all WebSocket event callback.
 type EventCallbackFunc func(eventName string, ctx *Context)
 
+// aah application interface for minimal purpose
+type application interface {
+	Config() *config.Config
+	Router() *router.Router
+	Log() log.Loggerer
+}
+
 //‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
 // Engine type and its methods
 //______________________________________________________________________________
@@ -70,15 +78,13 @@ type EventCallbackFunc func(eventName string, ctx *Context)
 type Engine struct {
 	checkOrigin      bool
 	originWhitelist  []*url.URL
-	cfg              *config.Config
-	router           *router.Router
+	app              application
 	registry         *ainsp.TargetRegistry
 	onPreConnect     EventCallbackFunc
 	onPostConnect    EventCallbackFunc
 	onPostDisconnect EventCallbackFunc
 	onError          EventCallbackFunc
 	idGenerator      IDGenerator
-	logger           log.Loggerer
 }
 
 // AddWebSocket method adds the given WebSocket implementation into engine.
@@ -133,7 +139,7 @@ func (e *Engine) SetIDGenerator(g IDGenerator) {
 // Along with Check Origin, aah WebSocket events such as `OnPreConnect`,
 // `OnPostConnect`, `OnPostDisconnect` and `OnError`.
 func (e *Engine) Handle(w http.ResponseWriter, r *http.Request) {
-	domain := e.router.Lookup(ahttp.Host(r))
+	domain := e.app.Router().Lookup(ahttp.Host(r))
 	if domain == nil {
 		e.Log().Errorf("WS: domain not found: %s", ahttp.Host(r))
 		e.replyError(w, http.StatusNotFound)
@@ -173,7 +179,7 @@ func (e *Engine) Handle(w http.ResponseWriter, r *http.Request) {
 
 // Log method provides logging methods at WebSocket engine.
 func (e *Engine) Log() log.Loggerer {
-	return e.logger
+	return e.app.Log()
 }
 
 //‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾
@@ -182,6 +188,15 @@ func (e *Engine) Log() log.Loggerer {
 
 func (e *Engine) connect(w http.ResponseWriter, r *http.Request, route *router.Route, pathParams ahttp.PathParams) (*Context, error) {
 	ctx := e.newContext(r, route, pathParams)
+
+	// Route constraints validation
+	if errs := valpar.ValidateValues(pathParams, route.Constraints); len(errs) > 0 {
+		ctx.Log().Error("WS: Route constraints failed")
+		ctx.reason = router.ErrRouteConstraintFailed
+		e.publishOnErrorEvent(ctx)
+		e.replyError(w, http.StatusBadRequest)
+		return nil, router.ErrRouteConstraintFailed
+	}
 
 	// Check Origin
 	if e.checkOrigin && !e.isSameOrigin(ctx) {
@@ -242,12 +257,11 @@ func (e *Engine) newContext(r *http.Request, route *router.Route, pathParams aht
 		Header: make(http.Header),
 		route:  route,
 		Req: &Request{
-			Host:        ahttp.Host(r),
-			Path:        r.URL.Path,
-			Header:      r.Header,
-			pathParams:  pathParams,
-			queryParams: r.URL.Query(),
-			raw:         r,
+			Host:       ahttp.Host(r),
+			Path:       r.URL.Path,
+			Header:     r.Header,
+			pathParams: pathParams,
+			raw:        r,
 		},
 	}
 	ctx.Req.ID = e.createID(ctx)
